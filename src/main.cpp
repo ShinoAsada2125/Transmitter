@@ -21,7 +21,7 @@ TO CHANGE TRANSMISSION TO EVERY HOUR:
 -------------------------------------------------------------------------------
 Change: const unsigned long LORA_TX_INTERVAL = 3600000;  // 1 hour = 60 * 60 * 1000 ms
 
-OTHER ADJUSTABLE PARAMETERS:
+OTHER ADJUSTABLE PARAMETER(s):
 -------------------------------------------------------------------------------
 1. TANK DIMENSIONS (cm) - Change for your tank:
    - TANK_WIDTH_CM, TANK_LENGTH_CM, TANK_HEIGHT_CM
