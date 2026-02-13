@@ -210,6 +210,8 @@ void printLoraStatusToSerial();
 void checkForLoRaCommand();
 bool executeCommand(String command);
 void sendCommandFeedback(String cmd, bool success, String reason);
+void emergencyShutdownAll();
+void updateSafetyControl();
 
 // ===== GPIO / Expander / Servo helpers =====
 // PCF8575 helpers use 16-bit port values
@@ -852,19 +854,16 @@ void sendLoRaData() {
 }
 
 String createLoRaPacket() {
-  // NEW FORMAT: "WT1,T1,H1,T2,H2,WL,VOL,PERCENT,PKT#,TANK"
+  // SIMPLIFIED FORMAT: "T1,H1,T2,H2,VOL,TANK"
+  // Only 6 fields: temp1, humid1, temp2, humid2, water_volume, tank_full status
   // TANK: 1 = Full, 0 = Not Full
   
-  String packet = "WT1,";
-  packet += String(temperature, 1) + ",";
+  String packet = String(temperature, 1) + ",";
   packet += String(humidity, 1) + ",";
   packet += String(temperature2, 1) + ",";
   packet += String(humidity2, 1) + ",";
-  packet += String(water_level_cm, 1) + ",";
   packet += String(water_volume_liters, 1) + ",";
-  packet += String(water_percentage, 1) + ",";
-  packet += String(packetCounter) + ",";
-  packet += String(isTankFull ? "1" : "0");  // NEW: Tank status
+  packet += String(isTankFull ? "1" : "0");
   
   return packet;
 }
