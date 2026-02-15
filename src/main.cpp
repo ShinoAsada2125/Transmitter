@@ -230,7 +230,7 @@ const int SERVO_PRESS_ANGLE = 60; // degrees - change if needed
 //unsigned long SERVO_PRESS_MS = 800; // default press duration (ms)
 
 // Device mapping
-const bool PCF_ACTIVE_LOW = true; // Flip to false if your relays/LEDs are active-HIGH
+const bool PCF_ACTIVE_LOW = false; // Your LEDs/relays are active-HIGH
 enum DeviceType { DT_GPIO=0, DT_EXPANDER=1, DT_SERVO=2 };
 struct DeviceMap { const char* name; DeviceType type; int gpio; uint8_t expAddr; uint8_t expPin; bool protectedWhenFull; };
 
@@ -478,11 +478,13 @@ void loop() {
     // DO NOT block the loop - let other tasks continue!
   }
   
+  // SAFETY FIRST: Check float sensor EVERY loop iteration (not tied to slow sensor reads)
+  updateSafetyControl();
+  
   // Read sensors at specified interval (SENSOR_READ_INTERVAL)
   if (currentTime - lastSensorReadTime >= SENSOR_READ_INTERVAL) {
     lastSensorReadTime = currentTime;
     readSensors();
-    updateSafetyControl();
   }
   
   // Update LCD display at specified interval (DISPLAY_UPDATE_INTERVAL)
@@ -568,13 +570,27 @@ if (aht2.getEvent(&humidity_event2, &temp_event2)) {
 void updateSafetyControl() {
   // Read float sensor: LOW = closed = tank FULL (NO switch behavior)
   bool floatClosed = (digitalRead(FLOAT_SENSOR_PIN) == LOW);
+  
+  // Debounce: require consistent reading for 300ms before acting
+  static bool lastFloatReading = false;
+  static unsigned long floatStableTime = 0;
+  
+  if (floatClosed != lastFloatReading) {
+    lastFloatReading = floatClosed;
+    floatStableTime = millis();  // Reset debounce timer on change
+    return; // Don't act yet, wait for stable reading
+  }
+  
+  // Only update state after 300ms of stable reading
+  if (millis() - floatStableTime < 300) return;
+  
   isTankFull = floatClosed;
   
   static bool wasFull = false; // Track state change
   static unsigned long lastSafetyPrint = 0;
   
   if (isTankFull && !wasFull) {
-    // Tank just became full - EMERGENCY SHUTDOWN
+    // ============ TANK JUST BECAME FULL - EMERGENCY SHUTDOWN ============
     Serial.println("\n*** EMERGENCY SHUTDOWN: TANK FULL ***");
     
     // Immediate LCD warning
@@ -587,53 +603,101 @@ void updateSafetyControl() {
     emergencyShutdownAll();
     wasFull = true;
     
+    // Send TANK_FULL status to receiver so Flutter app updates immediately
+    if (loraInitialized) {
+      Serial.println("📤 Sending TANK_FULL status to receiver...");
+      String statusMsg = "STATUS:TANK_FULL";
+      radio.transmit(statusMsg);
+      radio.startReceive();
+    }
+    
   } else if (!isTankFull && wasFull) {
-    // Tank no longer full - manual reset required
-    Serial.println("\n*** TANK NO LONGER FULL - Reset required ***");
-    lcd.clear();  // Clear emergency message
-    wasFull = false;
-  } else if (isTankFull) {
-    // Keep expander outputs forced OFF while tank stays full
+    // ============ TANK NO LONGER FULL - AUTO RESTORE ALL DEVICES ============
+    Serial.println("\n*** TANK NO LONGER FULL - AUTO RESTORING ALL DEVICES ***");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("TANK OK - RESTORING");
+    
+    // Turn ON all PCF8575 expander devices (FAN1, FAN2, FAN3, HEATER)
     for (int i = 0; i < deviceMapCount; i++) {
       if (deviceMap[i].type == DT_EXPANDER) {
-        setExpanderPin(deviceMap[i].expPin, false);
+        setExpanderPin(deviceMap[i].expPin, true);  // Turn ON
+        Serial.printf("  ✅ Restored: %s (pin %d) -> ON\n", deviceMap[i].name, deviceMap[i].expPin);
       }
     }
     
-    // Periodic status print (every 10 seconds) when tank full
-    if (millis() - lastSafetyPrint > 10000) {
-      Serial.println("\n⚠️ SAFETY: Tank still full, all expander outputs forced OFF");
+    // Turn ON dehumidifier via servo (if it was off)
+    if (!dehumidifierOn) {
+      Serial.println("  🔄 Restoring dehumidifier -> ON");
+      dehumServo.attach(SERVO_PIN);
+      dehumServo.write(SERVO_PRESS_ANGLE);
+      delay(500);
+      dehumServo.write(SERVO_REST_ANGLE);
+      delay(100);
+      dehumServo.detach();
+      dehumidifierOn = true;
+      Serial.println("  ✅ Dehumidifier restored to ON");
+    }
+    
+    wasFull = false;
+    
+    // Send TANK_OK status to receiver so Flutter app updates immediately
+    if (loraInitialized) {
+      Serial.println("📤 Sending TANK_OK status to receiver...");
+      String statusMsg = "STATUS:TANK_OK";
+      radio.transmit(statusMsg);
+      radio.startReceive();
+    }
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("ALL DEVICES ON");
+    
+  } else if (isTankFull) {
+    // Periodically re-enforce forced OFF (every 2 seconds, not every loop)
+    if (millis() - lastSafetyPrint > 2000) {
+      for (int i = 0; i < deviceMapCount; i++) {
+        if (deviceMap[i].type == DT_EXPANDER) {
+          setExpanderPin(deviceMap[i].expPin, false);
+        }
+      }
+      
+      // Status print every 10 seconds
+      static unsigned long lastSafetyMsg = 0;
+      if (millis() - lastSafetyMsg > 10000) {
+        Serial.println("\n⚠️ SAFETY: Tank still full, all expander outputs forced OFF");
+        lastSafetyMsg = millis();
+      }
       lastSafetyPrint = millis();
     }
   }
 }
 
-// ADD THIS NEW FUNCTION after updateSafetyControl():
+// EMERGENCY SHUTDOWN — called when tank is full
 void emergencyShutdownAll() {
+  Serial.println("🚨 emergencyShutdownAll() EXECUTING...");
+  
   // Turn off all PCF8575 relays
   for (int i = 0; i < 16; i++) {
     setExpanderPin(i, false);
   }
+  Serial.println("   ✓ All PCF8575 pins set to OFF");
   
-  // Toggle dehumidifier OFF if we think it's on
-  if (dehumidifierOn) {
-    Serial.println("Emergency: Toggling dehumidifier OFF");
-    dehumServo.attach(SERVO_PIN);
-    dehumServo.write(SERVO_PRESS_ANGLE);
-    delay(500);
-    dehumServo.write(SERVO_REST_ANGLE);
-    delay(100);
-    dehumServo.detach();
-    dehumidifierOn = false;
-  } else {
-    // Just reset position to be safe
-    dehumServo.attach(SERVO_PIN);
-    dehumServo.write(SERVO_REST_ANGLE);
-    delay(100);
-    dehumServo.detach();
-  }
+  // ALWAYS press servo to toggle dehumidifier OFF (safety critical)
+  // Even if dehumidifierOn is false, press anyway to be safe
+  Serial.printf("   Servo press: dehumidifierOn was %s\n", dehumidifierOn ? "true" : "false");
+  dehumServo.attach(SERVO_PIN);
+  delay(50);  // Let servo attach settle
+  dehumServo.write(SERVO_PRESS_ANGLE);
+  Serial.printf("   Servo -> %d degrees (PRESS)\n", SERVO_PRESS_ANGLE);
+  delay(600);  // Hold press longer for reliability
+  dehumServo.write(SERVO_REST_ANGLE);
+  Serial.printf("   Servo -> %d degrees (REST)\n", SERVO_REST_ANGLE);
+  delay(150);
+  dehumServo.detach();
+  dehumidifierOn = false;
   
-  Serial.println("Emergency shutdown complete");
+  Serial.println("   ✅ Emergency shutdown complete");
 }
 
 
