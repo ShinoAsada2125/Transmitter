@@ -41,7 +41,8 @@ OTHER ADJUSTABLE PARAMETER(s):
 #include <ESP32Servo.h>
 
 // Enable a quick debug transmit mode for testing (set to 1 to enable)
-#define DEBUG_TX_TEST 1
+#define DEBUG_TX_TEST 0  // ← DISABLED FOR COMMAND TESTING (no sensor broadcasts)
+// NOTE: Set back to 1 to re-enable 5-second sensor broadcasts
 #include <Adafruit_AHTX0.h>
 #include <NewPing.h>
 #include <LiquidCrystal_I2C.h>
@@ -164,6 +165,11 @@ bool newCommandReceived = false;
 String receivedCommand = "";
 unsigned long lastCommandTime = 0;
 
+// Command deduplication (receiver sends each command twice for reliability)
+String lastExecutedCommand = "";
+unsigned long lastExecutedTime = 0;
+const unsigned long DEDUP_WINDOW_MS = 5000;  // Ignore same command within 5 seconds
+
 // TANK CONTROL VARIABLES
 //bool tankFull = false; // True when float is UP (state LOW)
 
@@ -224,6 +230,7 @@ const int SERVO_PRESS_ANGLE = 60; // degrees - change if needed
 //unsigned long SERVO_PRESS_MS = 800; // default press duration (ms)
 
 // Device mapping
+const bool PCF_ACTIVE_LOW = true; // Flip to false if your relays/LEDs are active-HIGH
 enum DeviceType { DT_GPIO=0, DT_EXPANDER=1, DT_SERVO=2 };
 struct DeviceMap { const char* name; DeviceType type; int gpio; uint8_t expAddr; uint8_t expPin; bool protectedWhenFull; };
 
@@ -237,6 +244,7 @@ DeviceMap deviceMap[] = {
 };
 const int deviceMapCount = sizeof(deviceMap)/sizeof(deviceMap[0]);
 void updateSafetyControl();
+void setExpanderPin(uint8_t pin, bool on);
 
 // ================================================================================
 // SECTION 11: SETUP FUNCTION - Runs once at startup
@@ -370,15 +378,41 @@ Serial.println("✓ Safety control GPIO13 initialized (LOW)");
   }
   // ===================================================
   
-  // ... rest of setup ...
-pcf8575.begin();
-Serial.println("✓ PCF8575 port expander initialized");
+// ================================================================================
+// PCF8575 INITIALIZATION (Using Working Diagnostic Pattern)
+// ================================================================================
+Serial.println("\n📟 Initializing PCF8575 I/O Expander...");
+Serial.println("   (Using proven diagnostic pattern)");
 
-// Set all 16 pins as OUTPUT, initial state = HIGH (relays OFF)
+// Force begin without checking return (matches working diagnostic)
+pcf8575.begin();
+Serial.println("   ✓ PCF8575 begin() called");
+
+// Set all 16 pins as OUTPUT, HIGH (LEDs/relays OFF for active-low)
+Serial.println("   Setting all pins to OUTPUT, HIGH...");
 for (int i = 0; i < 16; i++) {
     pcf8575.pinMode(i, OUTPUT, HIGH);
 }
-Serial.println("   All pins set OUTPUT, HIGH (relays off)");
+Serial.println("   ✓ All pins configured");
+
+// DIAGNOSTIC TEST: Blink pin 0 (like working diagnostic code)
+Serial.println("\n🔍 Running diagnostic test on pin 0...");
+for (int blink = 0; blink < 3; blink++) {
+    Serial.printf("   Blink %d: LED ON (LOW)\n", blink + 1);
+    pcf8575.digitalWrite(0, LOW);  // LED on (active-low)
+    delay(300);
+    
+    Serial.printf("   Blink %d: LED OFF (HIGH)\n", blink + 1);
+    pcf8575.digitalWrite(0, HIGH); // LED off
+    delay(300);
+}
+Serial.println("   ✓ Diagnostic test complete");
+Serial.println("   (If LED blinked 3 times, PCF8575 is working!)\n");
+
+// Ensure all pins are HIGH (off) after test
+for (int i = 0; i < 16; i++) {
+    pcf8575.digitalWrite(i, HIGH);
+}
 
 }
 
@@ -400,14 +434,32 @@ void loop() {
   
   // 2. Execute any received command IMMEDIATELY
   if (newCommandReceived) {
+    Serial.println("\n🎯 NEW COMMAND FLAG DETECTED!");
+    Serial.printf("   Command: [%s]\n", receivedCommand.c_str());
+    Serial.printf("   Tank Full: %s\n", isTankFull ? "YES" : "NO");
+    
     newCommandReceived = false; // Reset flag immediately
     
     // CRITICAL FIX: Ignore ACK packets from receiver to prevent infinite loop
-    if (receivedCommand.startsWith("ACK:")) {
-      Serial.println("Ignoring ACK from receiver (loop prevention)");
+    if (receivedCommand.startsWith("ACK:") || receivedCommand.startsWith("SENT:") || 
+        receivedCommand.startsWith("FORWARDED:")) {
+      Serial.println("   ℹ️ Ignoring ACK/status from receiver (loop prevention)");
+    }
+    // DEDUPLICATION: Ignore same command within 5-second window
+    // (Receiver sends each command twice for reliability against half-duplex collisions)
+    else if (receivedCommand == lastExecutedCommand && 
+             (millis() - lastExecutedTime) < DEDUP_WINDOW_MS) {
+      Serial.printf("   ℹ️ Ignoring duplicate [%s] (received %lums ago)\n", 
+                    receivedCommand.c_str(), millis() - lastExecutedTime);
     } else {
+      Serial.println("   ⚙️ Executing command...");
       // Execute the command
       bool success = executeCommand(receivedCommand);
+      Serial.printf("   Result: %s\n", success ? "✅ SUCCESS" : "❌ FAILED");
+      
+      // Track for deduplication
+      lastExecutedCommand = receivedCommand;
+      lastExecutedTime = millis();
       
       // Start feedback display timer (instead of blocking wait)
       commandFeedbackActive = true;
@@ -519,6 +571,7 @@ void updateSafetyControl() {
   isTankFull = floatClosed;
   
   static bool wasFull = false; // Track state change
+  static unsigned long lastSafetyPrint = 0;
   
   if (isTankFull && !wasFull) {
     // Tank just became full - EMERGENCY SHUTDOWN
@@ -539,6 +592,19 @@ void updateSafetyControl() {
     Serial.println("\n*** TANK NO LONGER FULL - Reset required ***");
     lcd.clear();  // Clear emergency message
     wasFull = false;
+  } else if (isTankFull) {
+    // Keep expander outputs forced OFF while tank stays full
+    for (int i = 0; i < deviceMapCount; i++) {
+      if (deviceMap[i].type == DT_EXPANDER) {
+        setExpanderPin(deviceMap[i].expPin, false);
+      }
+    }
+    
+    // Periodic status print (every 10 seconds) when tank full
+    if (millis() - lastSafetyPrint > 10000) {
+      Serial.println("\n⚠️ SAFETY: Tank still full, all expander outputs forced OFF");
+      lastSafetyPrint = millis();
+    }
   }
 }
 
@@ -546,7 +612,7 @@ void updateSafetyControl() {
 void emergencyShutdownAll() {
   // Turn off all PCF8575 relays
   for (int i = 0; i < 16; i++) {
-    pcf8575.digitalWrite(i, HIGH);
+    setExpanderPin(i, false);
   }
   
   // Toggle dehumidifier OFF if we think it's on
@@ -785,6 +851,8 @@ void sendLoRaData() {
   loraTransmitting = true;                     // Set transmission flag
   loraLastTxAttempt = millis();               // Record attempt time
   
+  Serial.println("\n⚠️ ========== TRANSMITTER BUSY - NOT LISTENING ==========");
+  
   String packet = createLoRaPacket();         // Create data packet
   
   Serial.println("\n" + String(millis() / 1000) + "s: ───────────────────");
@@ -874,6 +942,7 @@ void sendLoRaData() {
   
   loraTransmitting = false;  // Clear transmission flag
   
+  Serial.println("✅ ========== BACK IN LISTENING MODE (can receive commands) ==========\n");
 
 }
 
@@ -914,13 +983,25 @@ void checkForLoRaCommand() {
       receivedCommand = String((char*)buf);
       receivedCommand.trim();  // Remove any whitespace
       
+      Serial.printf("   📦 Raw bytes count: %d\n", strlen((char*)buf));
+      Serial.printf("   📝 Raw string: [%s]\n", receivedCommand.c_str());
+      Serial.printf("   📏 Length: %d chars\n", receivedCommand.length());
+      
+      // Show hex dump for first 20 chars
+      if (receivedCommand.length() > 0) {
+        Serial.print("   🔢 Hex: ");
+        for (int i = 0; i < min(20, (int)receivedCommand.length()); i++) {
+          Serial.printf("%02X ", (uint8_t)receivedCommand[i]);
+        }
+        Serial.println();
+      }
+      
       // Only process if command is not empty
       if (receivedCommand.length() > 0) {
         newCommandReceived = true;
         lastCommandTime = millis();
         
-        Serial.println("\n📥 LoRa COMMAND RECEIVED!");
-        Serial.printf("  Raw: [%s] (len=%d)\n", receivedCommand.c_str(), receivedCommand.length());
+        Serial.println("   ✅ Command queued for execution in main loop");
         
         // Parse to show what we got
         int colonPos = receivedCommand.indexOf(':');
@@ -929,12 +1010,12 @@ void checkForLoRaCommand() {
           String action = receivedCommand.substring(colonPos + 1);
           device.trim();
           action.trim();
-          Serial.printf("  Device: [%s] | Action: [%s]\n", device.c_str(), action.c_str());
-        } else {
-          Serial.println("  ⚠️ Parse error: No ':' separator found!");
+          Serial.printf("   ➡️ Parsed - Device: [%s] | Action: [%s]\n", device.c_str(), action.c_str());
+        } else if (!receivedCommand.startsWith("ACK:") && !receivedCommand.startsWith("REJECT:")) {
+          Serial.println("   ⚠️ Parse warning: No ':' separator found (not a valid command)");
         }
       } else {
-        Serial.println("  ⚠️ Received empty data");
+        Serial.println("   ⚠️ Received empty data (ignoring)");
       }
       
       // Return to RX mode immediately
@@ -1022,38 +1103,47 @@ bool executeCommand(String cmd) {
         return true;
       } 
       else if (deviceMap[i].type == DT_EXPANDER) {
-    // Active‑low logic: ON = LOW, OFF = HIGH
-    pcf8575.digitalWrite(deviceMap[i].expPin, val ? LOW : HIGH);
-    Serial.printf("  ✅ SUCCESS: %s (PCF8575 pin %d) -> %s\n", 
-                  deviceName.c_str(), deviceMap[i].expPin, 
-                  (val ? "ON (LOW)" : "OFF (HIGH)"));
-    sendCommandFeedback(deviceName, true, "OK");
-    return true;
-}
+        setExpanderPin(deviceMap[i].expPin, val == 1);
+        Serial.printf("  ✅ SUCCESS: %s (PCF8575 pin %d) -> %s\n", 
+                      deviceName.c_str(), deviceMap[i].expPin, 
+                      (val ? "ON" : "OFF"));
+        sendCommandFeedback(deviceName, true, "OK");
+        return true;
+      }
       else if (deviceMap[i].type == DT_SERVO) {
-        Serial.printf("SERVO: Command %s, Current state: %s\n", 
-                      val ? "ON" : "OFF", 
-                      dehumidifierOn ? "ON" : "OFF");
+        Serial.println("\n🎮 SERVO COMMAND DETECTED:");
+        Serial.printf("   Command wants: %s\n", val ? "ON" : "OFF");
+        Serial.printf("   Current state: %s\n", dehumidifierOn ? "ON" : "OFF");
+        Serial.printf("   Servo pin: %d\n", SERVO_PIN);
         
         // Check if already in requested state
         if ((val == 1 && dehumidifierOn) || (val == 0 && !dehumidifierOn)) {
-          Serial.println("  Already in requested state - no action");
+          Serial.println("   ℹ️ Already in requested state - no action needed");
           sendCommandFeedback(deviceName, true, "Already " + String(dehumidifierOn ? "ON" : "OFF"));
           return true;
         }
         
         // Need to toggle to reach desired state
-        Serial.println("  Pressing button to change state...");
+        Serial.println("   🔄 Toggling servo (pressing button)...");
+        Serial.printf("   1. Attaching servo to pin %d\n", SERVO_PIN);
         dehumServo.attach(SERVO_PIN);
+        delay(50);
+        
+        Serial.printf("   2. Moving to PRESS angle (%d°)\n", SERVO_PRESS_ANGLE);
         dehumServo.write(SERVO_PRESS_ANGLE);
         delay(500);
+        
+        Serial.printf("   3. Moving to REST angle (%d°)\n", SERVO_REST_ANGLE);
         dehumServo.write(SERVO_REST_ANGLE);
         delay(100);
+        
+        Serial.println("   4. Detaching servo");
         dehumServo.detach();
         
         dehumidifierOn = !dehumidifierOn;  // State flipped
         
-        Serial.printf("  Dehumidifier now: %s\n", dehumidifierOn ? "ON" : "OFF");
+        Serial.printf("   ✅ Servo toggle complete. Dehumidifier now: %s\n", 
+                      dehumidifierOn ? "ON" : "OFF");
         sendCommandFeedback(deviceName, true, dehumidifierOn ? "ON" : "OFF");
         return true;
       }
@@ -1231,4 +1321,23 @@ void sendCommandFeedback(String device, bool success, String reason) {
       Serial.printf("  ✗ Feedback failed (code %d)\n", state);
     }
   }
+}
+
+// Wrapper to keep PCF8575 polarity in one place with readback verification
+void setExpanderPin(uint8_t pin, bool on) {
+  uint8_t level = on ? (PCF_ACTIVE_LOW ? LOW : HIGH)
+                     : (PCF_ACTIVE_LOW ? HIGH : LOW);
+  Serial.printf("🔧 setExpanderPin(%d, %s) -> writing %s\n", 
+                pin, on ? "ON" : "OFF", level == LOW ? "LOW" : "HIGH");
+  
+  // Write to pin
+  pcf8575.digitalWrite(pin, level);
+  
+  // Readback verification (using digitalRead for individual pin)
+  delay(10); // Small delay for I2C to settle
+  uint8_t readBack = pcf8575.digitalRead(pin);
+  Serial.printf("   Readback: pin %d = %s (%s)\n", 
+                pin, 
+                readBack == HIGH ? "HIGH" : "LOW",
+                readBack == level ? "✓ Match" : "✗ Mismatch");
 }
