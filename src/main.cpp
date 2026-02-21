@@ -52,17 +52,17 @@ OTHER ADJUSTABLE PARAMETER(s):
 // ================================================================================
 // SECTION 1: HARDWARE PIN CONFIGURATION (Change if wiring differs)
 // ================================================================================
-#define TRIG_PIN      27      // Was 27, now GPIO 32
-#define ECHO_PIN      26      // Was 26, now GPIO 33 (freeing GPIO 26 for I2C)     // GPIO 26 - Ultrasonic ECHO (INPUT)
+#define TRIG_PIN      27      // GPIO 27 - Ultrasonic TRIG (OUTPUT)
+#define ECHO_PIN      26      // GPIO 26 - Ultrasonic ECHO (INPUT)
 #define MAX_DISTANCE  400     // HC-SR04 maximum range in cm
 
 #define I2C_SDA       21      // GPIO 21 - I2C Data line
 #define I2C_SCL       22      // GPIO 22 - I2C Clock line
-#define BUTTON_PIN    15       // GPIO 2  - Display toggle button (INPUT_PULLUP)
+#define BUTTON_PIN    15      // GPIO 15 - Display toggle button (INPUT_PULLUP)
 
-// new aht20 sensor for inside 
-#define I2C2_SDA 32    // GPIO 32 for second I2C SDA
-#define I2C2_SCL 33    // GPIO 33 for second I2C SCL
+// Second AHT20 sensor (ambient/chamber)
+#define I2C2_SDA      32     // GPIO 32 - Second I2C SDA
+#define I2C2_SCL      33     // GPIO 33 - Second I2C SCL
 
 // LoRa Module SPI Pins (SX1278)
 #define LORA_SCK   18      // GPIO18 - SPI Clock
@@ -72,18 +72,17 @@ OTHER ADJUSTABLE PARAMETER(s):
 #define LORA_RST   14      // GPIO14 - Reset
 #define LORA_DIO0  4       // GPIO4  - Digital I/O 0 (interrupt pin)
 
-// Define which GPIO pins are available for remote control
-// Example: GPIO 12 for FAN, GPIO 13 for HEATER
-#define CONTROL_GPIO_1 12
-#define CONTROL_GPIO_2 13
-#define FLOAT_SENSOR_PIN 16 // Float sensor pin. LOW = Tank FULL (Float UP).
-// Add more as needed
-// PCF8575 EXPANDER PINS - ADD THESE
-#define PCF8575_ADDR  0x20   // I2C address of expander
-#define EXP_FAN1_PIN  0       // Intake fan
-#define EXP_FAN2_PIN  1       // Circulation fan  
-#define EXP_FAN3_PIN  2       // Condenser fan
-#define EXP_HEATER_PIN 3      // Heater relay
+// Remote control GPIO pins
+#define CONTROL_GPIO_1    12    // GPIO 12 - Control output 1
+#define CONTROL_GPIO_2    13    // GPIO 13 - Control output 2
+#define FLOAT_SENSOR_PIN  16    // GPIO 16 - Float sensor (LOW = Tank FULL)
+
+// PCF8575 I/O Expander pins
+#define PCF8575_ADDR   0x20    // I2C address of expander
+#define EXP_FAN1_PIN   0       // Intake fan
+#define EXP_FAN2_PIN   1       // Circulation fan
+#define EXP_FAN3_PIN   2       // Condenser fan
+#define EXP_HEATER_PIN 3       // Heater relay
 
 // ================================================================================
 // SECTION 2: LCD CONFIGURATION
@@ -170,10 +169,9 @@ String lastExecutedCommand = "";
 unsigned long lastExecutedTime = 0;
 const unsigned long DEDUP_WINDOW_MS = 5000;  // Ignore same command within 5 seconds
 
-// TANK CONTROL VARIABLES
-//bool tankFull = false; // True when float is UP (state LOW)
-
+// Tank state variables
 bool isTankFull = false; // True when float sensor is LOW (tank full)
+
 // Button debouncing variables
 bool lastButtonState = HIGH;
 bool currentButtonState = HIGH;
@@ -185,8 +183,9 @@ unsigned long lastSensorReadTime = 0;
 unsigned long lastLoRaTxTime = 0;
 unsigned long lastDisplayUpdateTime = 0;
 unsigned long lastStatusPrintTime = 0;
-//dehumidifer tracking
+// Dehumidifier state tracking
 bool dehumidifierOn = false;
+
 // LoRa status tracking
 bool loraInitialized = false;       // LoRa module initialization status
 bool loraTransmitting = false;      // Current transmission state
@@ -219,15 +218,13 @@ bool executeCommand(String command);
 void sendCommandFeedback(String cmd, bool success, String reason);
 void emergencyShutdownAll();
 void updateSafetyControl();
-
-
+void setExpanderPin(uint8_t pin, bool on);
 
 // Servo for dehumidifier
 #define SERVO_PIN 25
 Servo dehumServo;
 const int SERVO_REST_ANGLE = 0;
-const int SERVO_PRESS_ANGLE = 60; // degrees - change if needed
-//unsigned long SERVO_PRESS_MS = 800; // default press duration (ms)
+const int SERVO_PRESS_ANGLE = 60; // degrees - adjust as needed
 
 // Device mapping
 const bool PCF_ACTIVE_LOW = false; // Your LEDs/relays are active-HIGH
@@ -236,15 +233,13 @@ struct DeviceMap { const char* name; DeviceType type; int gpio; uint8_t expAddr;
 
 // Hardcoded mapping - edit and reflash to change mappings
 DeviceMap deviceMap[] = {
-  {"HEATER", DT_EXPANDER, 0, PCF8575_ADDR, EXP_HEATER_PIN, true},   // Changed to expander + protected
-  {"FAN1", DT_EXPANDER, 0, PCF8575_ADDR, EXP_FAN1_PIN, true},       // Changed to expander + protected
-  {"FAN2", DT_EXPANDER, 0, PCF8575_ADDR, EXP_FAN2_PIN, true},       // Added
-  {"FAN3", DT_EXPANDER, 0, PCF8575_ADDR, EXP_FAN3_PIN, true},       // Added
-  {"DEHUM", DT_SERVO, SERVO_PIN, 0, 0, true},                       // Already protected
+  {"HEATER", DT_EXPANDER, 0, PCF8575_ADDR, EXP_HEATER_PIN, true},
+  {"FAN1",   DT_EXPANDER, 0, PCF8575_ADDR, EXP_FAN1_PIN,   true},
+  {"FAN2",   DT_EXPANDER, 0, PCF8575_ADDR, EXP_FAN2_PIN,   true},
+  {"FAN3",   DT_EXPANDER, 0, PCF8575_ADDR, EXP_FAN3_PIN,   true},
+  {"DEHUM",  DT_SERVO,    SERVO_PIN, 0,    0,               true},
 };
 const int deviceMapCount = sizeof(deviceMap)/sizeof(deviceMap[0]);
-void updateSafetyControl();
-void setExpanderPin(uint8_t pin, bool on);
 
 // ================================================================================
 // SECTION 11: SETUP FUNCTION - Runs once at startup
@@ -253,7 +248,7 @@ void setup() {
   Serial.begin(115200);
   delay(1000); // Wait for serial monitor to initialize
   
-  Serial.println("\n" + String(millis() / 1000) + "s: ========================================");
+  Serial.printf("\n%lus: ========================================\n", millis() / 1000);
   Serial.println("        ESP32 WATER TANK MONITOR");
   Serial.println("        with LoRa Transmission");
   Serial.println("========================================\n");
@@ -273,20 +268,13 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
 
-  // ---------- PCF8575 EXPANDER INITIALISATION ----------   // <--- ADD THIS BLOCK
-
-
-
   // Initialize second I2C bus for ambient sensor
   Wire1.begin(I2C2_SDA, I2C2_SCL);
   Wire1.setClock(100000);
-  
 
   // Scan for I2C devices
   scanI2CDevices();
 
-
-  
   // Initialize LCD display
   initializeLCD();
   
@@ -301,19 +289,15 @@ void setup() {
   }
   Serial.println("✓ AHT20 temperature/humidity sensor initialized");
   showSystemStatus("AHT20: OK", 1);
-  
-// Initialize second I2C bus for ambient sensor
-Wire1.begin(I2C2_SDA, I2C2_SCL);
-Wire1.setClock(100000); // 100kHz I2C speed
 
-if (!aht2.begin(&Wire1)) {  // Note: &Wire1 specifies second I2C bus
-  Serial.println("⚠️ WARNING: Failed to initialize second AHT20!");
-  // Don't halt system - run with one sensor if needed
-  showSystemStatus("AHT20-2: Fail", 2);
-} else {
-  Serial.println("✓ Second AHT20 initialized (Ambient/Chamber)");
-  showSystemStatus("AHT20-2: OK", 2);
-}
+  // Initialize second AHT20 on second I2C bus
+  if (!aht2.begin(&Wire1)) {
+    Serial.println("⚠️ WARNING: Failed to initialize second AHT20!");
+    showSystemStatus("AHT20-2: Fail", 2);
+  } else {
+    Serial.println("✓ Second AHT20 initialized (Ambient/Chamber)");
+    showSystemStatus("AHT20-2: OK", 2);
+  }
 
 
   // Initialize LoRa radio module
@@ -334,34 +318,22 @@ if (!aht2.begin(&Wire1)) {  // Note: &Wire1 specifies second I2C bus
     Serial.println("⚠️ SYSTEM READY - LoRa DISABLED");
   }
   
-  Serial.println("\n" + String(millis() / 1000) + "s: Starting main loop...");
+  Serial.printf("\n%lus: Starting main loop...\n", millis() / 1000);
   Serial.println("========================================\n");
   
   delay(2000); // Show ready message for 2 seconds
   lcd.clear(); // Clear for main display
 
+  // Initialize remote control GPIOs
   pinMode(CONTROL_GPIO_1, OUTPUT);
   digitalWrite(CONTROL_GPIO_1, LOW);
   pinMode(CONTROL_GPIO_2, OUTPUT);
   digitalWrite(CONTROL_GPIO_2, LOW);
   Serial.println("✓ Remote control GPIOs initialized (OFF)");
 
-//___________________________________________________
-// Initialize Float Sensor pin
-pinMode(FLOAT_SENSOR_PIN, INPUT_PULLUP);
-Serial.println("✓ Float sensor initialized (INPUT_PULLUP)");
-
-// Initialize Safety Control GPIO
-pinMode(CONTROL_GPIO_2, OUTPUT);
-digitalWrite(CONTROL_GPIO_2, LOW); // Start with dehumidifier allowed to run (LOW)
-Serial.println("✓ Safety control GPIO13 initialized (LOW)");
-
-  // Initialize servo to rest position (attach briefly then detach)
-
-
-  
-  
- // ========== TURN ON DEHUMIDIFIER AT STARTUP ==========
+  // Initialize Float Sensor pin
+  pinMode(FLOAT_SENSOR_PIN, INPUT_PULLUP);
+  Serial.println("✓ Float sensor initialized (INPUT_PULLUP)");
   if (digitalRead(FLOAT_SENSOR_PIN) == LOW) {
     Serial.println("Startup: Tank FULL - dehumidifier stays OFF");
     dehumidifierOn = false;
@@ -376,44 +348,35 @@ Serial.println("✓ Safety control GPIO13 initialized (LOW)");
     dehumidifierOn = true;                 // Now ON
     Serial.println("Dehumidifier initialized to ON");
   }
-  // ===================================================
-  
-// ================================================================================
-// PCF8575 INITIALIZATION (Using Working Diagnostic Pattern)
-// ================================================================================
-Serial.println("\n📟 Initializing PCF8575 I/O Expander...");
-Serial.println("   (Using proven diagnostic pattern)");
 
-// Force begin without checking return (matches working diagnostic)
-pcf8575.begin();
-Serial.println("   ✓ PCF8575 begin() called");
+  // ── PCF8575 I/O Expander Initialization ──
+  Serial.println("\n📟 Initializing PCF8575 I/O Expander...");
 
-// Set all 16 pins as OUTPUT, HIGH (LEDs/relays OFF for active-low)
-Serial.println("   Setting all pins to OUTPUT, HIGH...");
-for (int i = 0; i < 16; i++) {
+  pcf8575.begin();
+  Serial.println("   ✓ PCF8575 begin() called");
+
+  // Set all 16 pins as OUTPUT, HIGH (relays OFF)
+  for (int i = 0; i < 16; i++) {
     pcf8575.pinMode(i, OUTPUT, HIGH);
-}
-Serial.println("   ✓ All pins configured");
+  }
+  Serial.println("   ✓ All pins configured");
 
-// DIAGNOSTIC TEST: Blink pin 0 (like working diagnostic code)
-Serial.println("\n🔍 Running diagnostic test on pin 0...");
-for (int blink = 0; blink < 3; blink++) {
+  // Diagnostic blink test on pin 0
+  Serial.println("\n🔍 Running diagnostic test on pin 0...");
+  for (int blink = 0; blink < 3; blink++) {
     Serial.printf("   Blink %d: LED ON (LOW)\n", blink + 1);
-    pcf8575.digitalWrite(0, LOW);  // LED on (active-low)
+    pcf8575.digitalWrite(0, LOW);
     delay(300);
-    
     Serial.printf("   Blink %d: LED OFF (HIGH)\n", blink + 1);
-    pcf8575.digitalWrite(0, HIGH); // LED off
+    pcf8575.digitalWrite(0, HIGH);
     delay(300);
-}
-Serial.println("   ✓ Diagnostic test complete");
-Serial.println("   (If LED blinked 3 times, PCF8575 is working!)\n");
+  }
+  Serial.println("   ✓ Diagnostic test complete");
 
-// Ensure all pins are HIGH (off) after test
-for (int i = 0; i < 16; i++) {
+  // Ensure all pins are OFF after test
+  for (int i = 0; i < 16; i++) {
     pcf8575.digitalWrite(i, HIGH);
-}
-
+  }
 }
 
 // ================================================================================
@@ -505,8 +468,6 @@ void loop() {
   delay(10); // Small delay for system stability
 }
 
-
-
 // ================================================================================
 // SECTION 13: SENSOR READING FUNCTIONS
 // ================================================================================
@@ -521,14 +482,13 @@ void readSensors() {
   }
   
   // Read second AHT20 (ambient/chamber conditions)
-sensors_event_t humidity_event2, temp_event2;
-if (aht2.getEvent(&humidity_event2, &temp_event2)) {
-  temperature2 = temp_event2.temperature;
-  humidity2 = humidity_event2.relative_humidity;
-} else {
-  Serial.println("ERROR: Failed to read second AHT20!");
-}
-
+  sensors_event_t humidity_event2, temp_event2;
+  if (aht2.getEvent(&humidity_event2, &temp_event2)) {
+    temperature2 = temp_event2.temperature;
+    humidity2 = humidity_event2.relative_humidity;
+  } else {
+    Serial.println("ERROR: Failed to read second AHT20!");
+  }
 
   // Read ultrasonic sensor with averaging (3 readings)
   unsigned int totalDistance = 0;
@@ -700,10 +660,6 @@ void emergencyShutdownAll() {
   Serial.println("   ✅ Emergency shutdown complete");
 }
 
-
-
-
-
 // ================================================================================
 // SECTION 14: DISPLAY FUNCTIONS
 // ================================================================================
@@ -740,11 +696,7 @@ void updateDisplay() {
     lcd.setCursor(2, 3);
     lcd.print(humidity2, 1);           // Row 3: Humidity value
     lcd.print("%");
-  
-
-}
-
-  else {
+  } else {
     // ===== DISPLAY MODE 2: Water Volume and Level =====
     lcd.setCursor(0, 0);
     lcd.print("  WATER VOLUME  ");    // Row 0: Title
@@ -774,60 +726,25 @@ void updateDisplay() {
   // Display mode indicator (top-right corner)
   lcd.setCursor(17, 0);
   if (currentDisplayMode == DISPLAY_TEMP_HUMID) {
-  lcd.print("TO");
+    lcd.print("TO");
   } else if (currentDisplayMode == DISPLAY_WATER_VOLUME) {
-  lcd.print("V");
+    lcd.print("V");
   } else {
-  lcd.print("TI");  // For COMPARE mode
+    lcd.print("TI");  // For COMPARE mode
   }
-  
-  // ===== LoRa STATUS INDICATOR (Top-right, positions 16-18) =====
-  /*lcd.setCursor(16, 0);
-  if (loraTransmitting) {
-    lcd.print("TX");      // Currently transmitting
-  } else if (loraInitialized) {
-    unsigned long timeSinceLastTx = (millis() - loraLastTxSuccess) / 1000;
-    if (timeSinceLastTx < 30) {
-      lcd.print("OK");    // Recent success (<30 seconds)
-    } else if (timeSinceLastTx < 300) {
-      lcd.print("--");    // Older success (30s-5min)
-    } else if (loraLastTxSuccess > 0) {
-      lcd.print("??");    // Very old/no recent success
-    } else {
-      lcd.print("RDY");   // Ready but never transmitted
-    }
-  } else {
-    lcd.print("NO");      // LoRa not initialized
-  }
-  
-  // ===== PACKET COUNTER (Bottom-right corner) =====
-  lcd.setCursor(16, 3);
-  lcd.print("#");
-  if (packetCounter < 10) {
-    lcd.print("00");
-    lcd.print(packetCounter);
-  } else if (packetCounter < 100) {
-    lcd.print("0");
-    lcd.print(packetCounter);
-  } else {
-    lcd.print(packetCounter % 1000);  // Show last 3 digits
-  }*/
-    // ===== TANK STATUS INDICATOR (Right side, row 1) =====
-  lcd.setCursor(16, 1);  // Use columns 16-19 on row 1
+
+  // Tank status indicator (right side, row 1)
+  lcd.setCursor(16, 1);
   if (isTankFull) {
     lcd.print("FULL");
   } else {
-    lcd.print("    ");  // Clear with 4 spaces when not full
+    lcd.print("    ");
   }
-
 }
 
-// Toggle between display modes
-
-// In toggleDisplayMode() function, update to cycle through 3 modes:
+// Toggle between display modes (cycles through 3 modes)
 void toggleDisplayMode() {
-  currentDisplayMode = (DisplayMode)((currentDisplayMode + 1) % 3); // Changed from 2 to 3
-  
+  currentDisplayMode = (DisplayMode)((currentDisplayMode + 1) % 3);
   Serial.printf("Display mode changed to: %d\n", currentDisplayMode);
 }
 
@@ -919,12 +836,12 @@ void sendLoRaData() {
   
   String packet = createLoRaPacket();         // Create data packet
   
-  Serial.println("\n" + String(millis() / 1000) + "s: ───────────────────");
+  Serial.printf("\n%lus: ───────────────────\n", millis() / 1000);
   Serial.println("📡 LoRa TRANSMISSION ATTEMPT");
   Serial.println("──────────────────────────");
   Serial.printf("  Packet #%d\n", packetCounter);
   Serial.printf("  Length: %d bytes\n", packet.length());
-  Serial.println("  Data: " + packet);
+  Serial.printf("  Data: %s\n", packet.c_str());
   
   // Show transmission status on LCD
   lcd.clear();
@@ -932,18 +849,14 @@ void sendLoRaData() {
   
   // Transmit packet via LoRa
   int state = radio.transmit(packet);
-  
+
   // Return to RX mode explicitly (critical!)
   radio.startReceive();
-  
-  // Get signal quality metrics after transmission
-  if (state == RADIOLIB_ERR_NONE) {
-    lastRSSI = radio.getRSSI();  // Received Signal Strength Indicator
-    lastSNR = radio.getSNR();    // Signal-to-Noise Ratio
-  }
-  
+
   if (state == RADIOLIB_ERR_NONE) {
     // ===== TRANSMISSION SUCCESS =====
+    lastRSSI = radio.getRSSI();
+    lastSNR = radio.getSNR();
     loraLastTxSuccess = millis();            // Record success time
     loraTxSuccessCount++;                    // Increment success counter
     packetCounter++;                         // Increment packet counter
@@ -962,19 +875,7 @@ void sendLoRaData() {
     }
     
     Serial.println("──────────────────────────\n");
-    
-    // Show success on LCD for 2 seconds
-    /*showLoraStatusOnLCD("✓ OK", 0, 1);
-    
-     // Display RSSI on bottom row
-    String rssiStr = "RSSI:" + String(lastRSSI) + "dB";
-    lcd.setCursor(0, 3);
-    lcd.print("                    ");  // Clear line
-    lcd.setCursor(0, 3);
-    lcd.print(rssiStr);
-    
-    delay(2000); */ // Show success message for 2 seconds
-    
+
   } else {
     // ===== TRANSMISSION FAILED =====
     loraTxErrorCount++;  // Increment error counter
@@ -1000,10 +901,8 @@ void sendLoRaData() {
     
     Serial.printf("  Total Errors: %d\n", loraTxErrorCount);
     Serial.println("──────────────────────────\n");
-    
-    
   }
-  
+
   loraTransmitting = false;  // Clear transmission flag
   
   Serial.println("✅ ========== BACK IN LISTENING MODE (can receive commands) ==========\n");
@@ -1011,18 +910,12 @@ void sendLoRaData() {
 }
 
 String createLoRaPacket() {
-  // SIMPLIFIED FORMAT: "T1,H1,T2,H2,VOL,TANK"
-  // Only 6 fields: temp1, humid1, temp2, humid2, water_volume, tank_full status
-  // TANK: 1 = Full, 0 = Not Full
-  
-  String packet = String(temperature, 1) + ",";
-  packet += String(humidity, 1) + ",";
-  packet += String(temperature2, 1) + ",";
-  packet += String(humidity2, 1) + ",";
-  packet += String(water_volume_liters, 1) + ",";
-  packet += String(isTankFull ? "1" : "0");
-  
-  return packet;
+  // Format: "T1,H1,T2,H2,VOL,TANK" (TANK: 1=Full, 0=Not Full)
+  char buf[64];
+  snprintf(buf, sizeof(buf), "%.1f,%.1f,%.1f,%.1f,%.1f,%d",
+           temperature, humidity, temperature2, humidity2,
+           water_volume_liters, isTankFull ? 1 : 0);
+  return String(buf);
 }
 
 // ================================================================================
@@ -1119,6 +1012,36 @@ bool executeCommand(String cmd) {
     Serial.println("  ❌ ERROR: Empty command");
     sendCommandFeedback(cmd, false, "Empty command");
     return false;
+  }
+
+  // Special command: GETSTATE — report all device states back to receiver/app
+  if (cmd == "GETSTATE") {
+    Serial.println("  📊 Sending device state report...");
+
+    // Read actual PCF8575 pin states
+    uint8_t onLevel = PCF_ACTIVE_LOW ? LOW : HIGH;
+    bool fan1  = (pcf8575.digitalRead(EXP_FAN1_PIN)   == onLevel);
+    bool fan2  = (pcf8575.digitalRead(EXP_FAN2_PIN)   == onLevel);
+    bool fan3  = (pcf8575.digitalRead(EXP_FAN3_PIN)   == onLevel);
+    bool heater = (pcf8575.digitalRead(EXP_HEATER_PIN) == onLevel);
+
+    char stateBuf[128];
+    snprintf(stateBuf, sizeof(stateBuf),
+      "DEVSTATE:FAN1=%d,FAN2=%d,FAN3=%d,HEATER=%d,DEHUM=%d,TANK=%d",
+      fan1 ? 1 : 0, fan2 ? 1 : 0, fan3 ? 1 : 0, heater ? 1 : 0,
+      dehumidifierOn ? 1 : 0, isTankFull ? 1 : 0);
+
+    if (loraInitialized) {
+      String stateMsg = String(stateBuf);
+      int state = radio.transmit(stateMsg);
+      radio.startReceive();  // Return to RX mode
+      if (state == RADIOLIB_ERR_NONE) {
+        Serial.printf("  ✅ State report sent: %s\n", stateBuf);
+      } else {
+        Serial.printf("  ✗ State report failed (code %d)\n", state);
+      }
+    }
+    return true;
   }
   
   // NEW FORMAT: DEVICE:ACTION (e.g., HEATER:ON, FAN1:OFF)
@@ -1223,15 +1146,6 @@ bool executeCommand(String cmd) {
   sendCommandFeedback(deviceName, false, "Device not found");
   return false;
 }
-
-// ================================================================================
-// NEW SECTION FLOAT SENSOR HANDLING FUNCTIONS
-
-
-// ================================================================================
-// NEW SECTION FLOAT SENSOR HANDLING FUNCTIONS
-// ================================================================================
-
 
 // ================================================================================
 // SECTION 16: LoRa STATUS DISPLAY FUNCTIONS
